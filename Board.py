@@ -22,6 +22,7 @@
 #  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 #  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 #  SOFTWARE.
+#
 
 
 from smbus import SMBus
@@ -43,7 +44,6 @@ class Board:
 	# * bass(level = None, dB = False)
 	# * treble(level = None, dB = False)
 	# * tune(freq = None)
-	# * tuner_enable_frontend_i2c(enable = None)
 	
 	# Internal variables list
 	# * _gpio_en - GPIO pin connected to the EN pin of the board
@@ -79,7 +79,8 @@ class Board:
 		GPIO.setup(self._gpio_stby, GPIO.OUT, GPIO.LOW)
 		
 		self._state = {
-			"power": False, "mute": True,
+			"power": False,
+			"mute": True,
 			"DSP": {
 				"volume": 0,
 				"balance_left": 31,
@@ -91,8 +92,18 @@ class Board:
 				"treble": 0
 			},
 			"TUNER": {
+				"stereo": True,
+				"synthesizer_freq": 50,
+				"tuning_mute": False,
+				"SDS-SDR_hold": False,
+				"mute": False,
 				"frontend_i2c_enabled": False,
-				"freq": 0
+				"mode_FM": True,
+				"SDR": False,
+				"sensitivity_changed": False,
+				"temperature_compensation": False,
+				"noise_blanker": False,
+				"freq": 95.0
 			}
 		}
 		
@@ -341,11 +352,15 @@ class Board:
 	#*** TUNER CONTROL ***
 	
 	#*
-	#* Sets the frequency to be tuned (50kHz steps hardcoded for now)
-	#* @param float freq - the new frequency to be set or None to return current value only
-	#* @return float - current frequency (software only)
+	#* Sets the frequency to be tuned using given step
+	#* @param float freq - the new frequency in MHz for FM and kHz for AM to be set or None to return current value only
+	#* @param int step - the new step in kHz to be used for tuning (possible values are 3, 5, 10, 15, 25 and 50)
+	#* @return {"freq": float, "step": int} - current frequency and tuning step (software only)
 	#*
-	def tune(self, freq = None):
+	def tune(self, freq = None, step = None):
+		change_freq = False
+		change_step = False
+		
 		if freq != None:
 			if freq < 30.4:
 				freq = 30.4
@@ -353,10 +368,22 @@ class Board:
 				freq = 108.1
 			
 			self._state["TUNER"]["freq"] = float(freq)
-			
+			change_freq = True
+		
+		if step != None:
+			raise Exception("Changing of tuning step is not fully supported yet!")
+			step = int(step)
+			if step in [3, 5, 10, 15, 25, 50]:
+				self._state["TUNER"]["synthesizer_freq"] = step
+				change_step = True
+		
+		if change_step:
+			self._i2c_send_tuner_backend(1)
+			self._i2c_send_tuner_frontend(2)
+		elif change_freq:
 			self._i2c_send_tuner_frontend(2)
 		
-		return self._state["TUNER"]["freq"]
+		return {"freq": self._state["TUNER"]["freq"], "step": self._state["TUNER"]["synthesizer_freq"]}
 	# end of method tune
 	
 	#*
@@ -437,11 +464,21 @@ class Board:
 			last_byte = 2
 		
 		if last_byte > 1:
-			byte_2 = 0x01
+			byte_2 = 1 if self._state["TUNER"]["mode_FM"] else 0
+			#
+			#
+			byte_2 |= (1 << 3) if self._state["TUNER"]["SDR"] else 0
+			#
+			byte_2 |= (1 << 5) if self._state["TUNER"]["sensitivity_changed"] else 0
+			byte_2 |= (1 << 6) if self._state["TUNER"]["temperature_compensation"] else 0
+			byte_2 |= (1 << 7) if self._state["TUNER"]["noise_blanker"] else 0
 		
-		byte_1 = 0x7A
-		if self._state["TUNER"]["frontend_i2c_enabled"]:
-			byte_1 |= (1 << 7)
+		byte_1 = 0 if self._state["TUNER"]["stereo"] else 1
+		byte_1 |= (([3, 5, 10, 15, 25, 50].index(self._state["TUNER"]["synthesizer_freq"])) << 1)
+		byte_1 |= 0 if self._state["TUNER"]["tuning_mute"] else (1 << 4)
+		byte_1 |= 0 if self._state["TUNER"]["SDS-SDR_hold"] else (1 << 5)
+		byte_1 |= 0 if self._state["TUNER"]["mute"] else (1 << 6)
+		byte_1 |= (1 << 7) if self._state["TUNER"]["frontend_i2c_enabled"] else 0
 		
 		# send data
 		if last_byte > 1:
@@ -467,7 +504,12 @@ class Board:
 			byte_4 = 0x00# testing byte
 		
 		if last_byte > 2:
-			byte_3 = 0x37
+			byte_3 = 1 if self._state["TUNER"]["mode_FM"] else 0
+			byte_3 |= (0b11 << 1)
+			byte_3 |= (0 << 3)
+			byte_3 |= (1 << 4)
+			byte_3 |= (1 << 5)
+			byte_3 |= (0b00 << 6)
 		
 		freq = int(self._state["TUNER"]["freq"] * 10) * 2 + 1442
 		byte_1 = 0xFF & freq
