@@ -28,6 +28,9 @@
 from smbus import SMBus
 from RPi import GPIO
 
+from DSP_TDA7313 import DSP_TDA7313 as DSP
+from TUNER_BIG import TUNER_BIG as TUNER
+
 from time import sleep
 import math
 
@@ -38,12 +41,10 @@ class Board:
 	# * power(on = None)
 	# * reset()
 	# * mute(on = None)
-	# * volume(vol = None, dB = False)
-	# * balance(left = None, right = None, dB = False)
-	# * input(input = None, loudness = None, gain = None, dB = False)
-	# * bass(level = None, dB = False)
-	# * treble(level = None, dB = False)
-	# * tune(freq = None)
+	
+	# Constants list
+	# * DSP - holding instance of DSP control class
+	# * TUNER - holding instance of TUNER control class
 	
 	# Internal variables list
 	# * _gpio_en - GPIO pin connected to the EN pin of the board
@@ -51,11 +52,6 @@ class Board:
 	# * _bus - holding instance of SMBus providing I2C bus for communication with chips on the board
 	# * _state - dictionary holding current setup of the board
 	
-	
-	_gpio_en = None
-	_gpio_stby = None
-	_bus = None
-	_state = None
 	
 	#*
 	#* Inits class
@@ -80,32 +76,11 @@ class Board:
 		
 		self._state = {
 			"power": False,
-			"mute": True,
-			"DSP": {
-				"volume": 0,
-				"balance_left": 31,
-				"balance_right": 31,
-				"input": 0,
-				"input_loudness": True,
-				"input_gain": 0,
-				"bass": 0,
-				"treble": 0
-			},
-			"TUNER": {
-				"stereo": True,
-				"synthesizer_freq": 50,
-				"tuning_mute": False,
-				"SDS-SDR_hold": False,
-				"mute": False,
-				"frontend_i2c_enabled": False,
-				"mode_FM": True,
-				"SDR": False,
-				"sensitivity_changed": False,
-				"temperature_compensation": False,
-				"noise_blanker": False,
-				"freq": 95.0
-			}
+			"mute": True
 		}
+		
+		self.DSP = DSP(self)
+		self.TUNER = TUNER(self)
 		
 		# init GPIOs
 		self.power(False)
@@ -120,17 +95,6 @@ class Board:
 		GPIO.cleanup()
 	# end of method __del__
 	
-	#*
-	#* Sends actual settings to all I2C chips
-	#*
-	def setup_i2c_chips(self):
-		self._i2c_send_dsp(None)#TODO
-		self._i2c_send_tuner_backend(2)
-		self._i2c_send_tuner_frontend(4)
-	# end of method setup_i2c_chips
-	
-	
-	#*** CONTROL OF POWER AND MODES OF AMPLIFIER ***
 	
 	#*
 	#* Turns on-board voltage regulators on or off
@@ -145,13 +109,16 @@ class Board:
 			
 			if not self._state["power"]:
 				self.mute(True)
+				self.DSP.beforePowerOff()
+				self.TUNER.beforePowerOff()
 				sleep(0.2)
 			
 			GPIO.output(self._gpio_en, self._state["power"])
 			
 			if not old_state and self._state["power"]:
 				sleep(0.5)
-				self.setup_i2c_chips()
+				self.DSP.afterPowerOn()
+				self.TUNER.afterPowerOn()
 		
 		return self._state["power"]
 	# end of method power
@@ -182,349 +149,21 @@ class Board:
 	# end of method mute
 	
 	
-	#*** DSP CONTROL ***
-	
 	#*
-	#* Sets main volume
-	#* @param int/float vol - volume to be set (int level, float dB) or None to return current value only
-	#* @param bool dB - if the volume is given in decibels
-	#* @return int/float - current volume as level or in decibels (software only)
+	#* Send data over I2C if the Board is powered on
+	#* @param int address - address byte
+	#* @param tuple/list data - data bytes to be sent
 	#*
-	def volume(self, vol = None, dB = False):
-		if vol != None:
-			if dB:
-				if vol < -78.75:
-					vol = -78.75
-				elif vol > 0:
-					vol = 0
-				
-				self._state["DSP"]["volume"] = 63 + int( math.ceil( vol / 1.25 ) )
-			else:
-				if vol < 0:
-					vol = 0
-				elif vol > 63:
-					vol = 63
-				
-				self._state["DSP"]["volume"] = int(vol)
-			
-			self._i2c_send_dsp(None)#TODO
+	def _i2c_write(self, address, data):
+		if address < 0 or len(data) < 1:
+			return
 		
-		return self._state["DSP"]["volume"] if not dB else (self._state["DSP"]["volume"] - 63) * 1.25
-	# end of method volume
-	
-	#*
-	#* Sets balance of channels
-	#* @param int/float left - volume of left channel to be set (int level, float dB) or None to left untouched
-	#* @param int/float right - volume of right channel to be set (int level, float dB) or None to left untouched
-	#* @param bool dB - if the volume is given in decibels
-	#* @return {"left": int/float, "right": int/float} - current balance of channels (software only)
-	#*
-	def balance(self, left = None, right = None, dB = False):
-		if left != None or right != None:
-			if left != None:
-				if dB:
-					if left < -38.75:
-						left = -38.75
-					elif left > 0:
-						left = 0
-					
-					self._state["DSP"]["balance_left"] = 31 + int( math.ceil( left / 1.25 ) )
-				else:
-					if left < 0:
-						left = 0
-					elif left > 31:
-						left = 31
-					
-					self._state["DSP"]["balance_left"] = int(left)
-			
-			if right != None:
-				if dB:
-					if right < -38.75:
-						right = -38.75
-					elif right > 0:
-						right = 0
-					
-					self._state["DSP"]["balance_right"] = 31 + int( math.ceil( right / 1.25 ) )
-				else:
-					if right < 0:
-						right = 0
-					elif right > 31:
-						right = 31
-					
-					self._state["DSP"]["balance_right"] = int(right)
-			
-			self._i2c_send_dsp(None)#TODO
-		
-		if not dB:
-			return {"left": self._state["DSP"]["balance_left"], "right": self._state["DSP"]["balance_right"]}
-		else:
-			return {"left": (self._state["DSP"]["balance_left"] - 31) * 1.25, "right": (self._state["DSP"]["balance_right"] - 31) * 1.25}
-	# end of method balance
-	
-	#*
-	#* Switches inputs and sets parameters of selected input
-	#* @param int input - number of input to switch to or None to left untouched
-	#* @param bool loudness - if loudness for current input should be switched on or off or None to left untouched
-	#* @param int/float - input gain to be set (int level, float dB) or None to left untouched
-	#* @param bool dB - if the gain is given in decibels
-	#* @return {"input": int, "loudness": bool, "gain": int/float} - current input and its parameters (software only)
-	#*
-	def input(self, input = None, loudness = None, gain = None, dB = False):
-		if input != None or loudness != None or gain != None:
-			if input != None:
-				if input < 0:
-					input = 0
-				elif input > 2:
-					input = 2
-				
-				self._state["DSP"]["input"] = int(input)
-			
-			if loudness != None:
-				self._state["DSP"]["input_loudness"] = bool(loudness)
-			
-			if gain != None:
-				if gain < 0:
-					gain = 0
-				
-				if dB:
-					if gain > 11.25:
-						gain = 11.25
-					
-					self._state["DSP"]["input_gain"] = int(math.ceil( gain / 3.75 ) )
-				else:
-					if gain > 3:
-						gain = 3
-					
-					self._state["DSP"]["input_gain"] = int(gain)
-			
-			self._i2c_send_dsp(None)#TODO
-		
-		return {"input": self._state["DSP"]["input"], "loudness": self._state["DSP"]["input_loudness"], "gain": (self._state["DSP"]["input_gain"] if not dB else self._state["DSP"]["input_gain"] * 3.75)}
-	# end of method input
-	
-	#*
-	#* Sets bass level
-	#* @param int level - bass level to be set or None to return current value only
-	#* @param bool dB - if the level is given in decibels
-	#* @return int - current bass level (software only)
-	#*
-	def bass(self, level = None, dB = False):
-		if level != None:
-			if dB:
-				level = level / 2
-			
-			if level < -7:
-				level = -7
-			elif level > 7:
-				level = 7
-			
-			self._state["DSP"]["bass"] = int(level)
-			
-			self._i2c_send_dsp(None)#TODO
-		
-		return self._state["DSP"]["bass"] if not dB else self._state["DSP"]["bass"] * 2
-	# end of method bass
-	
-	#*
-	#* Sets treble level
-	#* @param int level - treble level to be set or None to return current value only
-	#* @param bool dB - if the level is given in decibels
-	#* @return int - current treble level (software only)
-	#*
-	def treble(self, level = None, dB = False):
-		if level != None:
-			if dB:
-				level = level / 2
-			
-			if level < -7:
-				level = -7
-			elif level > 7:
-				level = 7
-			
-			self._state["DSP"]["treble"] = int(level)
-			
-			self._i2c_send_dsp(None)#TODO
-		
-		return self._state["DSP"]["treble"] if not dB else self._state["DSP"]["treble"] * 2
-	# end of method treble
-	
-	
-	#*** TUNER CONTROL ***
-	
-	#*
-	#* Sets the frequency to be tuned using given step
-	#* @param float freq - the new frequency in MHz for FM and kHz for AM to be set or None to return current value only
-	#* @param int step - the new step in kHz to be used for tuning (possible values are 3, 5, 10, 15, 25 and 50)
-	#* @return {"freq": float, "step": int} - current frequency and tuning step (software only)
-	#*
-	def tune(self, freq = None, step = None):
-		change_freq = False
-		change_step = False
-		
-		if freq != None:
-			if freq < 30.4:
-				freq = 30.4
-			elif freq > 108.1:
-				freq = 108.1
-			
-			self._state["TUNER"]["freq"] = float(freq)
-			change_freq = True
-		
-		if step != None:
-			raise Exception("Changing of tuning step is not fully supported yet!")
-			step = int(step)
-			if step in [3, 5, 10, 15, 25, 50]:
-				self._state["TUNER"]["synthesizer_freq"] = step
-				change_step = True
-		
-		if change_step:
-			self._i2c_send_tuner_backend(1)
-			self._i2c_send_tuner_frontend(2)
-		elif change_freq:
-			self._i2c_send_tuner_frontend(2)
-		
-		return {"freq": self._state["TUNER"]["freq"], "step": self._state["TUNER"]["synthesizer_freq"]}
-	# end of method tune
-	
-	#*
-	#* Enables or disables I2C to tuner frontend-chip (function provided by tuner backend-chip)
-	#* @param bool enable - True/False for enabling or disabling it, None to return current state only
-	#* @return bool - if the I2C bus to tuner frontend-chip is enabled or not (software only)
-	#*
-	def tuner_enable_frontend_i2c(self, enable = None):
-		if enable != None:
-			self._state["TUNER"]["frontend_i2c_enabled"] = bool(enable)
-			
-			self._i2c_send_tuner_backend(1)
-		
-		return self._state["TUNER"]["frontend_i2c_enabled"]
-	# end of method tuner_enable_frontend_i2c
-	
-	
-	#*** INTERNAL METHODS FOR SENDING DATA OVER I2C TO CHIPS ***
-	
-	#*
-	#* Send data over I2C to DSP
-	#* @param
-	#*
-	def _i2c_send_dsp(self, bytes):
 		if not self._state["power"]:# send data to board but only if it is powered
 			return
 		
-		#TODO choose bytes to be sent
-		
-		# build bytes from instance variables
-		byte_volume = 63 - self._state["DSP"]["volume"]
-		byte_balance_left_1 = (0b100 << 5) | (31 - self._state["DSP"]["balance_left"])
-		byte_balance_left_2 = (0b110 << 5) | (31 - self._state["DSP"]["balance_left"])
-		byte_balance_right_1 = (0b101 << 5) | (31 - self._state["DSP"]["balance_right"])
-		byte_balance_right_2 = (0b111 << 5) | (31 - self._state["DSP"]["balance_right"])
-		
-		byte_input = (0b010 << 5)
-		byte_input |= ((3 - self._state["DSP"]["input_gain"]) << 3)
-		byte_input |= (0 if self._state["DSP"]["input_loudness"] else (1 << 2))
-		byte_input |= self._state["DSP"]["input"]
-		
-		byte_bass = (0b0110 << 4)
-		if self._state["DSP"]["bass"] < 0:
-			byte_bass |= self._state["DSP"]["bass"] + 7
+		if len(data) > 1:
+			self._bus.write_i2c_block_data(address, data[0], data[1:])
 		else:
-			byte_bass |= (1 << 3) | (7 - self._state["DSP"]["bass"])
-		
-		byte_treble = (0b0111 << 4)
-		if self._state["DSP"]["treble"] < 0:
-			byte_treble |= self._state["DSP"]["treble"] + 7
-		else:
-			byte_treble |= (1 << 3) | (7 - self._state["DSP"]["treble"])
-		
-		# send data
-		self._bus.write_i2c_block_data(0x44, byte_volume, [byte_balance_left_1, byte_balance_left_2, byte_balance_right_1, byte_balance_right_2, byte_input, byte_bass, byte_treble])
-		
-		'''
-		self._bus.write_byte(0x44, byte_volume)
-		self._bus.write_i2c_block_data(0x44, byte_balance_left_1, [byte_balance_left_2])
-		self._bus.write_i2c_block_data(0x44, byte_balance_right_1, [byte_balance_right_2])
-		self._bus.write_byte(0x44, byte_input)
-		self._bus.write_byte(0x44, byte_bass)
-		self._bus.write_byte(0x44, byte_treble)
-		'''
-	# end of method _i2c_send_dsp
-	
-	#*
-	#* Send data over I2C to tuner backend-chip
-	#* @param int last_byte - number of last byte to be sent (inclusive)
-	#*
-	def _i2c_send_tuner_backend(self, last_byte):
-		if not self._state["power"]:# send data to board but only if it is powered
-			return
-		
-		if last_byte < 1:
-			return
-		elif last_byte > 2:
-			last_byte = 2
-		
-		if last_byte > 1:
-			byte_2 = 1 if self._state["TUNER"]["mode_FM"] else 0
-			#
-			#
-			byte_2 |= (1 << 3) if self._state["TUNER"]["SDR"] else 0
-			#
-			byte_2 |= (1 << 5) if self._state["TUNER"]["sensitivity_changed"] else 0
-			byte_2 |= (1 << 6) if self._state["TUNER"]["temperature_compensation"] else 0
-			byte_2 |= (1 << 7) if self._state["TUNER"]["noise_blanker"] else 0
-		
-		byte_1 = 0 if self._state["TUNER"]["stereo"] else 1
-		byte_1 |= (([3, 5, 10, 15, 25, 50].index(self._state["TUNER"]["synthesizer_freq"])) << 1)
-		byte_1 |= 0 if self._state["TUNER"]["tuning_mute"] else (1 << 4)
-		byte_1 |= 0 if self._state["TUNER"]["SDS-SDR_hold"] else (1 << 5)
-		byte_1 |= 0 if self._state["TUNER"]["mute"] else (1 << 6)
-		byte_1 |= (1 << 7) if self._state["TUNER"]["frontend_i2c_enabled"] else 0
-		
-		# send data
-		if last_byte > 1:
-			self._bus.write_i2c_block_data(0x61, byte_1, [byte_2])
-		else:
-			self._bus.write_byte(0x61, byte_1)
-	# end of method _i2c_send_tuner_backend
-	
-	#*
-	#* Send data over I2C to tuner frontend-chip
-	#* @param int last_byte - number of last byte to be sent (inclusive)
-	#*
-	def _i2c_send_tuner_frontend(self, last_byte):
-		if not self._state["power"]:# send data to board but only if it is powered
-			return
-		
-		if last_byte < 1:
-			return
-		elif last_byte > 4:
-			last_byte = 4
-		
-		if last_byte > 3:
-			byte_4 = 0x00# testing byte
-		
-		if last_byte > 2:
-			byte_3 = 1 if self._state["TUNER"]["mode_FM"] else 0
-			byte_3 |= (0b11 << 1)
-			byte_3 |= (0 << 3)
-			byte_3 |= (1 << 4)
-			byte_3 |= (1 << 5)
-			byte_3 |= (0b00 << 6)
-		
-		freq = int(self._state["TUNER"]["freq"] * 10) * 2 + 1442
-		byte_1 = 0xFF & freq
-		byte_2 = 0xFF & (freq >> 8)
-		
-		# enable I2C
-		self.tuner_enable_frontend_i2c(True)
-		# send data
-		if last_byte > 3:
-			self._bus.write_i2c_block_data(0x62, byte_1, [byte_2, byte_3, byte_4])
-		elif last_byte > 2:
-			self._bus.write_i2c_block_data(0x62, byte_1, [byte_2, byte_3])
-		else:
-			self._bus.write_i2c_block_data(0x62, byte_1, [byte_2])
-		# disable I2C
-		self.tuner_enable_frontend_i2c(False)
-	# end of method _i2c_send_tuner_frontend
+			self._bus.write_byte(address, data[0])
+	# end of method _i2c_write
 # end of class Board
